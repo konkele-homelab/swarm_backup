@@ -1,0 +1,42 @@
+name: Build & Push Development Image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: [self-hosted]
+    env:
+      APP: ${{ github.event.repository.name }}
+
+    steps:
+      # Checkout source code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Login to self-hosted Docker registry
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASS }}
+
+      # Build and push Docker image (always tagged 'dev')
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.REGISTRY }}/${{ env.APP }}:dev
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.created=${{ github.run_started_at }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repository }}
+            org.opencontainers.image.version=dev

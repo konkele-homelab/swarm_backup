@@ -1,0 +1,135 @@
+name: Update Release then Build & Push Production Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: [self-hosted]
+    outputs:
+      new_tag: ${{ steps.set_tag.outputs.new_tag }}
+      major: ${{ steps.set_tag.outputs.major }}
+      minor: ${{ steps.set_tag.outputs.minor }}
+      full_tag: ${{ steps.set_tag.outputs.full_tag }}
+      is_main: ${{ steps.set_tag.outputs.is_main }}
+    steps:
+      # Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Configure Git
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      # Determine the effective tag
+      - name: Set version tag
+        id: set_tag
+        run: |
+          IS_MAIN=false
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            # Workflow triggered by a tag
+            NEW_TAG=${GITHUB_REF#refs/tags/}
+          else
+            # Workflow triggered by main branch → bump version
+            IS_MAIN=true
+            latest_tag=$(git ls-remote --tags origin \
+              | awk -F/ '{print $3}' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n1)
+            [[ -z "$latest_tag" ]] && latest_tag="v0.0.0"
+
+            commit_message=$(git log -1 --pretty=%B)
+            bump="patch"
+            [[ "$commit_message" == BREAKING* ]] && bump="major"
+            [[ "$commit_message" == feat* ]] && bump="minor"
+
+            IFS='.' read -r major minor patch <<< "${latest_tag#v}"
+            case "$bump" in
+              major) major=$((major+1)); minor=0; patch=0 ;;
+              minor) minor=$((minor+1)); patch=0 ;;
+              patch) patch=$((patch+1)) ;;
+            esac
+            NEW_TAG="v${major}.${minor}.${patch}"
+
+            # Push new tag if it doesn't exist
+            if ! git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              git tag "$NEW_TAG"
+              git push origin "$NEW_TAG"
+            fi
+          fi
+
+          # Set outputs for Docker tagging
+          version=${NEW_TAG#v}
+          IFS='.' read -r major minor patch <<< "$version"
+          full_tag="$version"
+
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "major=$major" >> $GITHUB_OUTPUT
+          echo "minor=$minor" >> $GITHUB_OUTPUT
+          echo "full_tag=$full_tag" >> $GITHUB_OUTPUT
+          echo "is_main=$IS_MAIN" >> $GITHUB_OUTPUT
+
+  build:
+    runs-on: [self-hosted]
+    needs: version
+    env:
+      APP: ${{ github.event.repository.name }}
+      NEW_TAG: ${{ needs.version.outputs.full_tag }}
+      MAJOR: ${{ needs.version.outputs.major }}
+      MINOR: ${{ needs.version.outputs.minor }}
+      IS_MAIN: ${{ needs.version.outputs.is_main }}
+    steps:
+      # Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Generate Docker metadata
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.REGISTRY }}/${{ env.APP }}
+          tags: |
+            type=raw,value=latest,enable=${{ env.IS_MAIN == 'true' }}
+            type=raw,value=${{ env.NEW_TAG }}
+            type=raw,value=${{ env.MAJOR }}.${{ env.MINOR }}
+            type=raw,value=${{ env.MAJOR }}
+
+      # Login to Container Registry
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASS }}
+
+      # Build and push Docker image
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.created=${{ github.run_started_at }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repository }}
+            org.opencontainers.image.version=${{ env.NEW_TAG }}
