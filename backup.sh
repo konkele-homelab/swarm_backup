@@ -66,12 +66,16 @@ send_email() {
 # Pre-link pruning
 # ----------------------
 if [[ -d "$BACKUP_DEST" ]]; then
-    log "Pre-link pruning old dirs (>30 days)..."
-    if [[ "$DRY_RUN" != "on" ]]; then
-        find "$BACKUP_DEST" -maxdepth 1 -type d -mtime +30 -exec rm -rf {} \; 2>/dev/null || true
-    else
-        log "[DRY-RUN] would prune old dirs in $BACKUP_DEST"
-    fi
+    log "Pre-link pruning orphaned directories (ignoring mtime)..."
+
+    find "$BACKUP_DEST" -maxdepth 1 -mindepth 1 -type d \
+        ! -name daily ! -name weekly ! -name monthly \
+        | while read -r orphan; do
+            log "Removing orphan directory: $orphan"
+            [[ "$DRY_RUN" != "on" ]] && rm -rf "$orphan"
+        done
+else
+    log "Backup destination does not exist, skipping pre-link prune."
 fi
 
 # ----------------------
@@ -103,7 +107,7 @@ else
 fi
 
 # ----------------------
-# Scale down services (quiet)
+# Scale down services
 # ----------------------
 services=$(docker service ls -q --filter "label=${SCALE_LABEL}=${SCALE_VALUE}" || true)
 if [[ -n "$services" ]]; then
@@ -145,7 +149,7 @@ else
 fi
 
 # ----------------------
-# Restore services (quiet)
+# Restore services
 # ----------------------
 if [[ -s "$ORIG_REPLICAS_FILE" ]]; then
     log "Restoring services:"
@@ -182,17 +186,37 @@ fi
 # ----------------------
 # GFS pruning
 # ----------------------
-log "Pruning old backups..."
-if [[ "$DRY_RUN" != "on" ]]; then
-    find "$daily_dir"   -maxdepth 1 -type d -name '????-??-??_*' -mtime +${DAILY_COUNT}      -exec rm -rf {} \; 2>/dev/null || true
-    find "$weekly_dir"  -maxdepth 1 -type d -mtime +$((7*WEEKLY_COUNT))                     -exec rm -rf {} \; 2>/dev/null || true
-    find "$monthly_dir" -maxdepth 1 -type d -mtime +$((30*MONTHLY_COUNT))                   -exec rm -rf {} \; 2>/dev/null || true
-else
-    log "[DRY-RUN] would prune expired daily/weekly/monthly backups"
-fi
+prune_by_count() {
+    local dir="$1"
+    local keep="$2"
+
+    mapfile -t dirs < <(
+        find "$dir" \
+            -maxdepth 1 -mindepth 1 -type d \
+            -regex '.*/[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}$' \
+            -printf "%f\n" \
+            | sort -V
+    )
+
+    local total=${#dirs[@]}
+    local remove=$(( total - keep ))
+
+    if (( remove > 0 )); then
+        for d in "${dirs[@]:0:remove}"; do
+            log "Pruning $dir/$d"
+            [[ "$DRY_RUN" != "on" ]] && rm -rf "$dir/$d" \
+                || log "[DRY-RUN] would prune $dir/$d"
+        done
+    fi
+}
+
+log "Pruning old backups (by count)…"
+prune_by_count "$daily_dir"   "$DAILY_COUNT"
+prune_by_count "$weekly_dir"  "$WEEKLY_COUNT"
+prune_by_count "$monthly_dir" "$MONTHLY_COUNT"
 
 # ----------------------
-# Send email with only current run logs
+# Send email
 # ----------------------
 send_email "Backup completed $(date '+%Y-%m-%d %H:%M:%S')" "success"
 log "Backup script finished"
