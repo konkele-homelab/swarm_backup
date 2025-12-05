@@ -66,7 +66,7 @@ send_email() {
 # Pre-link pruning
 # ----------------------
 if [[ -d "$BACKUP_DEST" ]]; then
-    log "Pre-link pruning orphaned directories (ignoring mtime)..."
+    log "Pre-link pruning orphaned directories..."
 
     find "$BACKUP_DEST" -maxdepth 1 -mindepth 1 -type d \
         ! -name daily ! -name weekly ! -name monthly \
@@ -210,7 +210,7 @@ prune_by_count() {
     fi
 }
 
-log "Pruning old backups (by count)…"
+log "Pruning old backups (by count)..."
 prune_by_count "$daily_dir"   "$DAILY_COUNT"
 prune_by_count "$weekly_dir"  "$WEEKLY_COUNT"
 prune_by_count "$monthly_dir" "$MONTHLY_COUNT"
