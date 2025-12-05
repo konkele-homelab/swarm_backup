@@ -210,7 +210,7 @@ prune_by_count() {
     fi
 }
 
-log "Pruning old backups (by count)..."
+log "Pruning old backups..."
 prune_by_count "$daily_dir"   "$DAILY_COUNT"
 prune_by_count "$weekly_dir"  "$WEEKLY_COUNT"
 prune_by_count "$monthly_dir" "$MONTHLY_COUNT"
