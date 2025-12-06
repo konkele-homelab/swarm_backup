@@ -218,5 +218,5 @@ prune_by_count "$monthly_dir" "$MONTHLY_COUNT"
 # ----------------------
 # Send email
 # ----------------------
-log "Backup complted successfully"
+log "Backup completed successfully"
 send_email "Backup completed $(date '+%Y-%m-%d %H:%M:%S')" "success"
