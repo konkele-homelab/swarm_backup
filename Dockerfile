@@ -1,24 +1,20 @@
-FROM alpine:latest
+# Default Arguments for Upstream Base Image
+ARG UPSTREAM_REGISTRY=registry.example.com
+ARG UPSTREAM_TAG=latest
 
-# Install only necessary packages
+# Use Upstream Base Image
+FROM ${UPSTREAM_REGISTRY}/backup-base:${UPSTREAM_TAG}
+
+# Install required packages
 RUN apk add --no-cache \
     bash \
     rsync \
-    docker-cli \
-    msmtp \
-    ca-certificates \
-    tzdata \
-    coreutils
+    docker-cli
 
-# Create directory for scripts
-RUN mkdir -p /usr/local/bin
+# Swarm Backup Script
+ARG SCRIPT_FILE=backup-swarm.sh
 
-# Copy scripts
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY backup.sh /usr/local/bin/backup.sh
-
-# Make scripts executable
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/backup.sh
-
-# Entrypoint
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Install Application Specific Backup Script
+ENV APP_BACKUP=/config/${SCRIPT_FILE}
+COPY ${SCRIPT_FILE} ${APP_BACKUP}
+RUN chmod +x ${APP_BACKUP}

@@ -1,195 +1,152 @@
-# Backup Container
+# Swarm Backup Docker Container
 
-This repository provides a lightweight Alpine-based container for efficient, snapshot-style backups using **rsync**, **hard-link deduplication**, **GFS (Grandfather–Father–Son)** rotation, optional **Docker Swarm service scaling**, and email notifications via dynamically generated `msmtp` configuration.
+This repository contains a minimal Docker image to automate **Docker Swarm service backups** using a shell-based backup system. The container supports environment-based configuration, Swarm service scaling, snapshot retention policies, secrets, email notifications, and optional root execution.
 
-It includes:
-
-- `Dockerfile` – builds the backup container  
-- `entrypoint.sh` – prepares SMTP configuration, loads secrets, configures timezone, and launches the backup script  
-- `backup.sh` – performs the full backup workflow  
+The design follows a **wrapper + application script** model, making it easy to reuse common backup logic across multiple platforms.
 
 ---
 
 ## Features
 
-- Incremental backups with `rsync --link-dest`
-- Daily / Weekly / Monthly GFS rotation
-- Automatic pruning of old backup sets
-- Swarm service scaling down/up during backup
-- Dynamic SMTP configuration using environment variables **and/or Docker secrets**
-- Email notifications on success/failure
-- Timezone handling through `TZ`
-- DRY-RUN mode for testing backup logic
-- Alpine base for minimal footprint
+- Snapshot-style incremental backups using `rsync --link-dest`
+- Creates a **single timestamped snapshot directory per run**
+- Hard-link deduplication from previous backups (`latest`)
+- Optional Docker Swarm service scale-down/up during backup
+- Pluggable backup retention policies: **GFS**, **FIFO**, **Calendar**
+- Automatic creation of daily, weekly, and monthly snapshots (for GFS)
+- Runs as non-root user with configurable UID/GID or optionally as root (`RUN_AS_ROOT`)
+- Lightweight Alpine base image
+- Email notifications on success and/or failure
+- **DRY-RUN mode** for safe testing without modifying data
 
 ---
 
-# Dockerfile Overview
+## Retention Policies
 
-The Dockerfile:
+- **GFS (Grandfather-Father-Son)**: Retain daily, weekly, and monthly snapshots.
+- **FIFO (First-In-First-Out)**: Keep a fixed number of most recent snapshots.
+- **Calendar**: Keep snapshots for a fixed number of days.
 
-- Starts from `alpine:latest`
-- Installs:
-  - `bash`, `rsync`, `docker-cli`, `msmtp`, `tzdata`, `coreutils`, `ca-certificates`
-- Copies scripts into `/usr/local/bin`
-- Sets both scripts executable
-- Defines:
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+Retention behavior is controlled via environment variables and operates on **snapshot directories**, not individual files.
 
 ---
 
-# Entrypoint Script (`entrypoint.sh`)
+## Directory Layout
 
-The `entrypoint.sh` script is responsible for:
+```
+/backup/
+└── daily/
+    └── 2025-12-13_00-00-00/
+        └── snapshot/
+    └── 2025-12-14_00-00-00/
+        └── snapshot/
+└── weekly/
+    └── 2025-12-07_00-00-00/
+        └── snapshot/
+└── monthly/
+    └── 2025-12-01_00-00-00/
+        └── snapshot/
+└── latest -> daily/2025-12-14_00-00-00
 
-### 1. Loading SMTP-related environment variables
+```
 
-Default values are applied if not set:
+## Environment Variables
 
-| Variable | Default |
-|----------|---------|
-| `SMTP_SERVER` | `smtp.example.com` |
-| `SMTP_PORT` | `25` |
-| `SMTP_TLS` | `off` |
-| `SMTP_USER` | *(empty)* |
-| `SMTP_PASS` | *(empty)* |
-| `EMAIL_FROM` | `admin@example.com` |
-
----
-
-### 2. Loading secrets (optional)
-
-If provided using Docker secrets:
-
-| Secret File | Variable Filled |
-|-------------|-----------------|
-| `/run/secrets/smtp_user` | `SMTP_USER` |
-| `/run/secrets/smtp_pass` | `SMTP_PASS` |
-
-This allows secure credential handling in Swarm or Compose.
-
----
-
-### 3. Dynamic `msmtp` configuration generation
-
-The script creates `/etc/msmtp/msmtprc` automatically at container start using the environment variables and provided secrets:
-
-- Enables authentication only if `SMTP_USER` is set
-- Enables TLS if `SMTP_TLS=on`
-- Writes logs to `/var/log/msmtp.log`
-- Uses certificate bundle at `/etc/ssl/certs/ca-certificates.crt`
-- Uses `passwordeval` when a Docker secret is present
-
-This ensures `backup.sh` can send notifications reliably without pre-baked credentials.
-
----
-
-### 4. Timezone handling
-
-If the `TZ` environment variable is set:
-
-- Links correct zoneinfo file to `/etc/localtime`
-- Writes timezone name to `/etc/timezone`
-
-Example:
-
-TZ=America/Chicago
+| Variable            | Default                                | Description |
+|---------------------|----------------------------------------|-------------|
+| APP_NAME            | `Swarm`                                | Application name in status notifications |
+| BACKUP_SRC          | `/data`                                | Source directory to back up |
+| BACKUP_DEST         | `/backup`                              | Directory where backups are stored |
+| SCALE_LABEL         | `com.example.autobackup.enable`        | Label to identify services for scaling |
+| SCALE_VALUE         | `true`                                 | Value of label required for scaling |
+| EMAIL_ON_SUCCESS    | `false`                                | Send email when backup succeeds |
+| EMAIL_ON_FAILURE    | `true`                                 | Send email when backup fails |
+| EMAIL_TO            | `admin@example.com`                    | Recipient of email notifications |
+| EMAIL_FROM          | `backup@example.com`                   | Sender address for emails |
+| SMTP_SERVER         | `smtp.example.com`                     | SMTP server hostname or IP |
+| SMTP_PORT           | `25`                                   | SMTP server port |
+| SMTP_TLS            | `off`                                  | Enable TLS (`off` / `on`) |
+| SMTP_USER           | *(empty)*                              | SMTP username |
+| SMTP_USER_FILE      | *(empty)*                              | File or secret containing SMTP username |
+| SMTP_PASS           | *(empty)*                              | SMTP password |
+| SMTP_PASS_FILE      | *(empty)*                              | File or secret containing SMTP password |
+| RETENTION_POLICY    | `gfs`                                  | Retention strategy: `gfs`, `fifo`, or `calendar` |
+| GFS_DAILY           | `7`                                    | Number of daily snapshots to keep (GFS) |
+| GFS_WEEKLY          | `4`                                    | Number of weekly snapshots to keep (GFS) |
+| GFS_MONTHLY         | `6`                                    | Number of monthly snapshots to keep (GFS) |
+| FIFO_COUNT          | `14`                                   | Number of snapshots to retain (FIFO) |
+| CALENDAR_DAYS       | `30`                                   | Number of days to retain snapshots (Calendar) |
+| TZ                  | `America/Chicago`                      | Timezone used for timestamps |
+| USER_UID            | `3000`                                 | UID of backup user (non-root) |
+| USER_GID            | `3000`                                 | GID of backup user (non-root) |
+| DEBUG               | `false`                                | Keep container running after backup |
+| DRY_RUN             | `false`                                | Simulate backup without writing or scaling |
+| RUN_AS_ROOT         | `false`                                | Run backup as root instead of non-root user |
 
 ---
 
-### 5. Executing the backup script
+## Swarm Secret Format
 
-After initializing SMTP and timezone:
+The servers file (typically stored as a Docker Swarm secret) must contain one host per line:
 
-exec /usr/local/bin/backup.sh
+```
+/run/secrets/smtp_user -> SMTP_USER
+/run/secrets/smtp_pass -> SMTP_PASS
+```
 
-This replaces the shell with the backup process.
-
----
-
-# Backup Script (`backup.sh`)
-
-`backup.sh` performs the full backup routine including:
-
-- Pre-run cleanup and aging directory pruning
-- Daily backup creation
-- Hard-link optimization from previous `latest`
-- Optional Swarm service scale-down before rsync
-- Running the rsync backup
-- Updating `latest` symlink
-- Scaling services back up
-- GFS­ rotation (daily/weekly/monthly)
-- Email notification with run log
+> **Security Note**  
+> SMTP credentials should be stored as Swarm secrets to prevent plaintext exposure.
 
 ---
 
-## Backup Configuration Variables
+## Service Scaling Behavior
 
-| Variable | Default | Description |
-|---------|---------|-------------|
-| `BACKUP_SRC` | `/data` | Source directory |
-| `BACKUP_DEST` | `/backup` | Backup destination |
-| `SCALE_LABEL` | `com.example.autobackup.enable` | Swarm label to match |
-| `SCALE_VALUE` | `true` | Value required for scaling |
-| `DAILY_COUNT` | `7` | Daily backups to keep |
-| `WEEKLY_COUNT` | `4` | Weekly backups to keep |
-| `MONTHLY_COUNT` | `6` | Monthly backups to keep |
-| `EMAIL_ON_SUCCESS` | `off` | Email on success |
-| `EMAIL_ON_FAILURE` | `on` | Email on failure |
-| `SMTP_SERVER` | `smtp.example.com` | SMTP host |
-| `SMTP_PORT` | `25` | SMTP port |
-| `SMTP_TLS` | `off` | TLS for SMTP |
-| `SMTP_USER` | *(env or secret)* | SMTP user |
-| `SMTP_PASS` | *(env or secret)* | SMTP password |
-| `EMAIL_TO` | `admin@example.com` | Notification destination |
-| `EMAIL_FROM` | `backup@example.com` | Sender |
-| `DRY_RUN` | `off` | Simulate backups |
+Before running a backup, services with the label specified in `SCALE_LABEL` matching `SCALE_VALUE` are scaled down:
 
----
+- **Global services**: Constraints are added to temporarily pause execution.
+- **Replicated services**: Scaled down to 0 replicas.
+- The original service state is captured to allow safe rollback if the backup fails.
 
-# Email Notification Behavior
+After the backup:
 
-- Emails contain **only the current run log**
-- Emails are sent using `msmtp` with the dynamically generated config
-- Success emails sent only if:
-EMAIL_ON_SUCCESS=on
-- Failure emails sent only if:
-EMAIL_ON_FAILURE=on
+- Services are restored to their original state.
+- Waits for each service to reach the desired number of running tasks before continuing.
+- Logs all scale-down and restore actions.
 
----
+**Diagram**:
 
-# Logging
-
-| Path | Description |
-|------|-------------|
-| `/var/log/backup.log` | Rolling persistent backup log |
-| `/tmp/backup_run_<pid>.log` | Per-run log used for emails |
-| `/var/log/msmtp.log` | msmtp email logs |
+```
+[Backup Start]
+|
+v
+[Capture service state]
+|
+v
+[Scale down matching services] <-- Global & Replicated
+|
+v
+[Run rsync backup]
+|
+v
+[Apply retention policies]
+|
+v
+[Restore original service state]
+|
+v
+[Backup complete]
+```
 
 ---
 
-# DRY RUN Mode
-
-DRY_RUN=on
-
-This prevents:
-- rsync writing
-- directory removal
-- Swarm scale-down/up
-- symlink updates
-
-Useful for testing.
-
----
-
-# Example Docker Compose
+## Docker Compose Example (Swarm)
 
 ```yaml
 version: "3.9"
 
 services:
-  backup:
-    image: your-registry/backup-container:latest
+  backup-swarm:
+    image: your-dockerhub-username/backup-swarm:latest
 
     volumes:
       - /data:/data:ro
@@ -197,42 +154,33 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
     environment:
-      # Backup parameters
       BACKUP_SRC: /data
       BACKUP_DEST: /backup
-
-      # Swarm scaling behavior
       SCALE_LABEL: "com.example.autobackup.enable"
       SCALE_VALUE: "true"
-
-      # GFS retention rotation
+      RETENTION_POLICY: gfs
       DAILY_COUNT: "7"
       WEEKLY_COUNT: "4"
       MONTHLY_COUNT: "6"
-
-      # Email behavior
       EMAIL_ON_SUCCESS: "off"
       EMAIL_ON_FAILURE: "on"
-
-      # SMTP baseline config (secrets override user/pass)
       SMTP_SERVER: "smtp.example.com"
       SMTP_PORT: "587"
       SMTP_TLS: "on"
       EMAIL_FROM: "backup@example.com"
-
-      # Optional: container timezone
       TZ: "America/Chicago"
+      DRY_RUN: "false"
+      RUN_AS_ROOT: "false"
 
     secrets:
       - smtp_user
       - smtp_pass
 
     deploy:
+      mode: replicated
       replicas: 0
       restart_policy:
         condition: none
-
-      # Optional: run backup only on manager nodes
       placement:
         constraints:
           - node.role == manager
@@ -240,7 +188,51 @@ services:
 secrets:
   smtp_user:
     external: true
-
   smtp_pass:
     external: true
+```
+## Local Testing
 
+To test without Swarm:
+
+```bash
+docker run -it --rm \
+  -v /backup:/backup \
+  -v ./data:/data:ro \
+  -e BACKUP_DEST=/backup \
+  -e DRY_RUN=true \
+  your-dockerhub-username/backup-swarm:latest
+```
+
+Change `RETENTION_POLICY` to `fifo` or `calendar` to test other modes.
+
+---
+
+## Failure Semantics
+
+- If **any backup step fails**, the container exits with a non-zero code.
+- On failure:
+  - The snapshot directory is preserved for inspection.
+  - Retention policies are **not applied**.
+  - Failure notifications are sent if enabled.
+
+---
+
+## Logging
+
+- Logs are written to /var/log/backup.log and a per-run log in /tmp/backup_run_<pid>.log.
+- Email notifications contain only the per-run log.
+- Logs pruning actions according to the selected retention policy.
+- Swarm service scaling actions are logged.
+
+---
+
+## Notes
+
+- UID/GID customization ensures backup files match host filesystem ownership.
+- `RUN_AS_ROOT` allows elevated permissions for certain backup targets.
+- Pluggable retention policies allow flexible backup management:
+  - **GFS**: Daily/weekly/monthly snapshots with `latest` symlink.
+  - **FIFO**: Keeps only the last `FIFO_COUNT` snapshots.
+  - **Calendar**: Keeps all snapshots for a specified number of days.
+- Use `DRY_RUN=true` to safely test backup and retention behavior without modifying files.

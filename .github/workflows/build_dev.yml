@@ -1,7 +1,13 @@
+
 name: Build & Push Development Image
 
 on:
   workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Tag for the upstream image'
+        required: false
+        default: 'latest'
 
 permissions:
   contents: read
@@ -11,6 +17,7 @@ jobs:
     runs-on: [self-hosted]
     env:
       APP: ${{ github.event.repository.name }}
+      UPSTREAM_TAG: ${{ github.event.inputs.upstream_tag }}
 
     steps:
       # Checkout source code
@@ -25,13 +32,16 @@ jobs:
           username: ${{ secrets.REGISTRY_USER }}
           password: ${{ secrets.REGISTRY_PASS }}
 
-      # Build and push Docker image (always tagged 'dev')
+      # Build and push Docker image
       - name: Build and Push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ secrets.REGISTRY }}/${{ env.APP }}:dev
+          build-args: |
+            UPSTREAM_REGISTRY=${{ secrets.REGISTRY }}
+            UPSTREAM_TAG=${{ env.UPSTREAM_TAG }}
           platforms: linux/amd64
           provenance: false
           sbom: false
